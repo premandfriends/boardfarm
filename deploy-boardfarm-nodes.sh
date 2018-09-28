@@ -39,6 +39,41 @@ create_container_eth1_vlan () {
 	docker exec $cname ip link set dev eth1 address $(random_private_mac $vlan)
 }
 
+# eth0 is docker private network, eth1 is vlan on specific interface within a bridge
+create_container_eth1_bridged_vlan () {
+	local vlan=$1
+	local offset=${2:-0}
+
+	cname=bft-node-$IFACE-$vlan-$offset
+	docker stop $cname && docker rm $cname
+	docker run --name $cname --privileged -h $cname --restart=always \
+		-p $(( 5000 + $offset + $vlan )):22 \
+		-p $(( 8000 + $offset + $vlan )):8080 \
+		-d bft:node /usr/sbin/sshd -D
+
+	# create bridge
+	sudo ip link add br-$IFACE.$vlan type bridge
+	sudo ip link set br-$IFACE.$vlan up
+
+	# create uplink vlan on IFACE
+	sudo ip link add link $IFACE name $IFACE.$vlan type vlan id $vlan
+	sudo ip link set dev $IFACE.$vlan address $(random_private_mac $vlan)
+	sudo ip link set $IFACE.$vlan master br-$IFACE.$vlan
+	sudo ip link set $IFACE.$vlan up
+
+	# add veth for new container (one per container vs. the two above are shared)
+	sudo ip link add v$IFACE-$vlan-$offset type veth peer name tempfoo
+	sudo ip link set v$IFACE-$vlan-$offset master br-$IFACE.$vlan
+	sudo ip link set v$IFACE-$vlan-$offset up
+
+	# map other end of veth into container and rename to eth1 and bring it up
+	cspace=$(docker inspect --format '{{.State.Pid}}' $cname)
+	sudo ip link set dev tempfoo up
+	sudo ip link set netns $cspace dev tempfoo
+	docker exec $cname ip link set tempfoo name eth1
+	docker exec $cname ip link set eth1 up
+}
+
 # eth0/eth1 are both dhcp on the main network
 create_container_eth1_dhcp () {
 	local vlan=$1
